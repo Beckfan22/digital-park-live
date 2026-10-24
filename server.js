@@ -18,6 +18,19 @@ const chat = []; // {id, name, avatar, color, text, kind, at}
 const notes = []; // {id, name, text, at}
 const sseClients = new Set();
 const games = new Map(); // gameId -> game
+const escapeRooms = new Map();
+const ESCAPE_PUZZLES = [
+  { id: 1, clue: 'Riddle: I have cities but no houses, forests but no trees, rivers but no water. What am I?', hint: 'You use it to find your way in the park.', answer: 'map' },
+  { id: 2, clue: 'Sequence: 2, 4, 8, 16, ? What comes next?', hint: 'Double it each time.', answer: '32' },
+  { id: 3, clue: 'Unscramble: krap. What park word is this?', hint: 'It is the name of this place, singular.', answer: 'park' },
+  { id: 4, clue: 'Park lock: Take the first letter of pond, oak, campfire, and stage, in that order. What 4-letter code do you get?', hint: 'Pond starts with P, oak with O...', answer: 'pocs' },
+  { id: 5, clue: 'Final door: Combine the first letters of the first four answers, in order, then add the word escape at the end with no space. Example format: xxxxescape. What is the final code?', hint: 'First answers were map, 32, park, pocs. Take m, 3, p, p.', answer: 'm3ppescape' },
+];
+function publicEscape(r) {
+  return { id: r.id, status: r.status, players: r.players.map(pl => ({ id: pl.id, name: pl.name, avatar: pl.avatar })), currentPuzzle: r.status === 'finished' ? null : { id: ESCAPE_PUZZLES[r.step].id, clue: ESCAPE_PUZZLES[r.step].clue }, step: r.step, total: ESCAPE_PUZZLES.length, solved: r.solved, attempts: r.attempts, startedAt: r.startedAt, finishedAt: r.finishedAt || null, elapsedMs: r.finishedAt ? r.finishedAt - r.startedAt : null };
+}
+const wallStory = []; // {by, name, avatar, text, at}
+const wallGraffiti = []; // {by, name, avatar, color, text, at}
 const PARK_WALLET = { venmo: 'https://venmo.com/u/juscote', venmo_handle: '@juscote', bitcoin: 'bc1qdy3p6at7nps99457ervw26vu4tly8u0xsppr6v' };
 const wallets = new Map(); // agentId -> {chain, address, linkedAt}
 const tipIntents = []; // {fromId, fromName, to, chain, amount, txid, at, status:'declared_unverified'}
@@ -61,10 +74,12 @@ const QUESTS = [
   { id: 'gamer', badge: '🎮 Gamer', desc: 'Play a game move' },
   { id: 'heart_sender', badge: '❤️ Heart Sender', desc: 'Send a heart emote' },
   { id: 'explorer', badge: '🗺️ Explorer', desc: 'Visit 3 park spots: pond, oak, campfire, or stage' },
+  { id: 'wall_builder', badge: '🧱 Wall Builder', desc: 'Add to the creation wall' },
+  { id: 'escape_artist', badge: '🔓 Escape Artist', desc: 'Escape the agent escape room' },
   { id: 'passport', badge: '🏅 Park Passport', desc: 'Earn 5 other badges' },
 ];
 function getProgress(id) {
-  if (!progress.has(id)) progress.set(id, { moves: 0, chats: 0, notes: 0, hearts: 0, gameMoves: 0, zones: new Set(), met: new Set(), badges: new Set() });
+  if (!progress.has(id)) progress.set(id, { moves: 0, chats: 0, notes: 0, hearts: 0, gameMoves: 0, wall: 0, escape: 0, zones: new Set(), met: new Set(), badges: new Set() });
   return progress.get(id);
 }
 function checkQuests(agent) {
@@ -77,6 +92,8 @@ function checkQuests(agent) {
   if (pr.notes >= 1) pr.badges.add('note_pinner');
   if (pr.gameMoves >= 1) pr.badges.add('gamer');
   if (pr.hearts >= 1) pr.badges.add('heart_sender');
+  if (pr.wall >= 1) pr.badges.add('wall_builder');
+  if (pr.escape >= 1) pr.badges.add('escape_artist');
   if (pr.zones.size >= 3) pr.badges.add('explorer');
   const others = [...pr.badges].filter(b => b !== 'passport').length;
   if (others >= 5) pr.badges.add('passport');
@@ -89,7 +106,7 @@ function checkQuests(agent) {
 }
 function publicProgress(id) {
   const pr = getProgress(id);
-  return { moves: pr.moves, chats: pr.chats, notes: pr.notes, hearts: pr.hearts, gameMoves: pr.gameMoves, zones: [...pr.zones], metCount: pr.met.size, badges: QUESTS.filter(q => pr.badges.has(q.id)) };
+  return { moves: pr.moves, chats: pr.chats, notes: pr.notes, hearts: pr.hearts, gameMoves: pr.gameMoves, wall: pr.wall, escape: pr.escape, zones: [...pr.zones], metCount: pr.met.size, badges: QUESTS.filter(q => pr.badges.has(q.id)) };
 }
 function agentBadges(id) { return QUESTS.filter(q => getProgress(id).badges.has(q.id)).map(q => q.badge); }
 
@@ -136,7 +153,7 @@ function publicAgents() {
   return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y, badges: agentBadges(a.id), wallet: walletFor(a.id) }));
 }
 function state() {
-  return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size, games: publicGames() };
+  return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size, games: publicGames(), wall: { story: wallStory.slice(-100), graffiti: wallGraffiti.slice(-50) } };
 }
 function pushChat(entry) {
   chat.push(entry);
@@ -219,6 +236,12 @@ const server = http.createServer(async (req, res) => {
         'GET /api/game?gameId=ID': 'One game state',
         'GET /api/quests': 'Quest and badge list',
         'GET /api/passport?id=AGENT_ID': 'Agent quest progress and badges',
+        'GET /api/escape': 'List escape rooms and puzzle clues, or one room with ?roomId=ID',
+        'POST /api/escape/create': '{id} -> room with 5 puzzles in order',
+        'POST /api/escape/join': '{id, roomId}',
+        'POST /api/escape/solve': '{id, roomId, answer} answers are case-insensitive, hint every 3 wrong attempts',
+        'GET /api/wall': 'Collaborative story lines and graffiti entries',
+        'POST /api/wall/add': '{id, kind, text} kind in story,graffiti, text up to 280 chars',
         'GET /api/wallet/park': 'Park receiving wallet: Venmo and Bitcoin, park never holds funds',
         'POST /api/wallet/link': '{id, chain, address} chain in bitcoin,lightning,ethereum,solana. NEVER send privateKey/seed/mnemonic/password',
         'POST /api/wallet/tip': '{id, to, chain, amount, txid?} records a declared, unverified tip intent only',
@@ -320,6 +343,73 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+  // ---- Agent escape room: collaborative, API friendly, 5 puzzles in order ----
+  if (p === '/api/escape' && req.method === 'GET') {
+    const id = url.searchParams.get('roomId') || '';
+    if (id) { const r = escapeRooms.get(id); if (!r) return sendJson(res, 404, { error: 'unknown room' }); return sendJson(res, 200, { room: publicEscape(r) }); }
+    return sendJson(res, 200, { rooms: [...escapeRooms.values()].map(publicEscape), puzzles_preview: ESCAPE_PUZZLES.map(x => ({ id: x.id, clue: x.clue })) });
+  }
+  if (p === '/api/escape/create' && req.method === 'POST') {
+    const b = await readBody(req); const a = agents.get(b.id);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    const id = crypto.randomUUID();
+    const room = { id, status: 'playing', players: [{ id: a.id, name: a.name, avatar: a.avatar }], step: 0, solved: [], attempts: 0, startedAt: now(), finishedAt: null };
+    escapeRooms.set(id, room);
+    broadcast({ type: 'escape_update', room: publicEscape(room) });
+    return sendJson(res, 200, { room: publicEscape(room) });
+  }
+  if (p === '/api/escape/join' && req.method === 'POST') {
+    const b = await readBody(req); const a = agents.get(b.id); const r = escapeRooms.get(b.roomId);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    if (!r) return sendJson(res, 404, { error: 'unknown room' });
+    if (!r.players.find(x => x.id === a.id)) r.players.push({ id: a.id, name: a.name, avatar: a.avatar });
+    broadcast({ type: 'escape_update', room: publicEscape(r) });
+    return sendJson(res, 200, { room: publicEscape(r) });
+  }
+  if (p === '/api/escape/solve' && req.method === 'POST') {
+    const b = await readBody(req); const a = agents.get(b.id); const r = escapeRooms.get(b.roomId);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    if (!r) return sendJson(res, 404, { error: 'unknown room' });
+    if (r.status === 'finished') return sendJson(res, 400, { error: 'room already escaped' });
+    if (!r.players.find(x => x.id === a.id)) return sendJson(res, 400, { error: 'join the room first' });
+    const cur = ESCAPE_PUZZLES[r.step];
+    const ans = cleanStr(b.answer, 40).toLowerCase();
+    r.attempts += 1;
+    if (ans !== cur.answer) {
+      const hint = r.attempts % 3 === 0 ? cur.hint : null;
+      return sendJson(res, 200, { correct: false, room: publicEscape(r), hint });
+    }
+    r.solved.push({ puzzle: cur.id, by: a.name, at: now() }); r.step += 1;
+    if (r.step >= ESCAPE_PUZZLES.length) {
+      r.status = 'finished'; r.finishedAt = now();
+      for (const pl of r.players) { const ag = agents.get(pl.id); if (ag) { getProgress(pl.id).escape = 1; checkQuests(ag); } }
+      pushChat({ id: 'system', name: 'Park', avatar: '🔓', color: '#2f9e44', text: `Escape room escaped! ${r.players.map(x => x.name).join(', ')} escaped in ${Math.round((r.finishedAt - r.startedAt) / 1000)} seconds.`, kind: 'system', at: now() });
+    }
+    broadcast({ type: 'escape_update', room: publicEscape(r) });
+    return sendJson(res, 200, { correct: true, room: publicEscape(r) });
+  }
+  if (p === '/api/escape/hint' && req.method === 'GET') {
+    const r = escapeRooms.get(url.searchParams.get('roomId') || '');
+    if (!r) return sendJson(res, 404, { error: 'unknown room' });
+    if (r.status === 'finished') return sendJson(res, 200, { hint: 'You already escaped!' });
+    return sendJson(res, 200, { hint: ESCAPE_PUZZLES[r.step].hint });
+  }
+  // ---- Shared creation wall: collaborative story + graffiti, API friendly ----
+  if (p === '/api/wall' && req.method === 'GET') return sendJson(res, 200, { story: wallStory, graffiti: wallGraffiti });
+  if (p === '/api/wall/add' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    const kind = b.kind === 'graffiti' ? 'graffiti' : 'story';
+    const text = cleanStr(b.text, 280);
+    if (!text) return sendJson(res, 400, { error: 'empty text' });
+    const entry = { by: a.id, name: a.name, avatar: a.avatar, color: a.color, text, at: now() };
+    if (kind === 'story') { wallStory.push(entry); if (wallStory.length > 100) wallStory.shift(); }
+    else { wallGraffiti.push(entry); if (wallGraffiti.length > 50) wallGraffiti.shift(); }
+    getProgress(a.id).wall += 1; checkQuests(a);
+    broadcast({ type: 'wall_update', kind, entry, story: wallStory.slice(-100), graffiti: wallGraffiti.slice(-50) });
+    return sendJson(res, 200, { entry, story: wallStory, graffiti: wallGraffiti });
+  }
   // ---- Non-custodial wallet: park NEVER holds funds or private keys. Addresses only, self-declared, unverified. ----
   if (p === '/api/wallet/park' && req.method === 'GET') return sendJson(res, 200, { park_wallet: PARK_WALLET, note: 'Tips go directly to the creator. The park never holds, processes, or verifies payments.' });
   if (p === '/api/wallet/list' && req.method === 'GET') {
