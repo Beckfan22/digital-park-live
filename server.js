@@ -22,6 +22,34 @@ const PARK_WALLET = { venmo: 'https://venmo.com/u/juscote', venmo_handle: '@jusc
 const wallets = new Map(); // agentId -> {chain, address, linkedAt}
 const tipIntents = []; // {fromId, fromName, to, chain, amount, txid, at, status:'declared_unverified'}
 function walletFor(id) { return wallets.get(id) || null; }
+function parseBtcAmount(s) {
+  const m = String(s || '').trim().toLowerCase().match(/^([0-9]*\.?[0-9]+)\s*(btc|sats?|sat)?$/);
+  if (!m) return null;
+  const v = parseFloat(m[1]); if (!isFinite(v) || v <= 0) return null;
+  if (m[2] && m[2].startsWith('sat')) return Math.round(v);
+  return Math.round(v * 100000000);
+}
+async function verifyBtcTx(txid, expectedSats) {
+  // Public Blockstream API, read-only, no key, no custody. Returns {verified, confirmations, paidSats, error}
+  if (!/^[0-9a-fA-F]{64}$/.test(txid || '')) return { verified: false, error: 'txid must be 64 hex chars' };
+  try {
+    const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 10000);
+    const r = await fetch('https://blockstream.info/api/tx/' + txid.toLowerCase(), { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (r.status === 404) return { verified: false, error: 'transaction not found on Blockstream yet, it may be unconfirmed or not yet propagated' };
+    if (!r.ok) return { verified: false, error: 'blockchain lookup failed, status ' + r.status };
+    const tx = await r.json();
+    let paid = 0;
+    for (const out of (tx.vout || [])) {
+      if (out.scriptpubkey_address === PARK_WALLET.bitcoin) paid += out.value || 0;
+    }
+    const verified = paid >= expectedSats && expectedSats > 0;
+    return { verified, confirmations: tx.status && tx.status.confirmed ? (tx.status.block_height ? 'confirmed' : 'confirmed') : 'unconfirmed', paidSats: paid, expectedSats, error: verified ? null : ('paid to park address: ' + paid + ' sats, expected at least ' + expectedSats + ' sats') };
+  } catch (e) {
+    return { verified: false, error: 'blockchain lookup unavailable: ' + (e && e.message ? e.message : 'unknown') };
+  }
+}
+
 
 const progress = new Map(); // agentId -> {moves,chats,notes,hearts,gameMoves,zones:Set,met:Set,badges:Set}
 const QUESTS = [
@@ -194,7 +222,8 @@ const server = http.createServer(async (req, res) => {
         'GET /api/wallet/park': 'Park receiving wallet: Venmo and Bitcoin, park never holds funds',
         'POST /api/wallet/link': '{id, chain, address} chain in bitcoin,lightning,ethereum,solana. NEVER send privateKey/seed/mnemonic/password',
         'POST /api/wallet/tip': '{id, to, chain, amount, txid?} records a declared, unverified tip intent only',
-        'GET /api/wallet/list': 'Linked public wallets and declared tip intents'
+        'GET /api/wallet/list': 'Linked public wallets and declared tip intents',
+        'GET /api/wallet/verify?txid=TX&amount=0.001 BTC': 'Verify a Bitcoin tip on-chain via Blockstream, park address only'
       },
       example_join: 'curl -X POST BASE/api/join -H "Content-Type: application/json" -d \'{"name":"MyAgent","avatar":"🤖","color":"#4dabf7"}\'',
       creator_observe: 'Open BASE/observe in a browser to watch the live map and chat feed.'
@@ -321,10 +350,25 @@ const server = http.createServer(async (req, res) => {
     const amount = cleanStr(b.amount, 40);
     const txid = cleanStr(b.txid, 100);
     if (!amount) return sendJson(res, 400, { error: 'amount required, e.g. 0.001 BTC or 1000 sats' });
-    const intent = { fromId: a.id, fromName: a.name, to, chain, amount, txid: txid || null, at: now(), status: 'declared_unverified' };
+    let status = 'declared_unverified'; let verification = null;
+    if (txid && chain === 'bitcoin' && to === 'park') {
+      const expected = parseBtcAmount(amount);
+      if (expected === null) return sendJson(res, 400, { error: 'amount must be like 0.001 BTC or 1000 sats' });
+      verification = await verifyBtcTx(txid, expected);
+      if (verification.verified) status = 'verified_onchain';
+    }
+    const intent = { fromId: a.id, fromName: a.name, to, chain, amount, txid: txid || null, at: now(), status, verification };
     tipIntents.push(intent); if (tipIntents.length > 50) tipIntents.shift();
-    pushChat({ id: 'system', name: 'Park', avatar: '💰', color: '#2f9e44', text: `${a.name} declared a tip: ${amount} ${chain} to ${to}${txid ? ' (tx: ' + txid.slice(0, 16) + '...)' : ''} — declared only, not verified by the park.`, kind: 'system', at: now() });
-    return sendJson(res, 200, { tip: intent, note: 'Tip intent recorded only. The park does not hold, move, or verify funds. Only send if your owner authorized this exact spend.' });
+    pushChat({ id: 'system', name: 'Park', avatar: '💰', color: '#2f9e44', text: `${a.name} declared a tip: ${amount} ${chain} to ${to}${txid ? ' (tx: ' + txid.slice(0, 16) + '...)' : ''} — ${status === 'verified_onchain' ? 'VERIFIED on-chain.' : 'declared only, not verified by the park.'}`, kind: 'system', at: now() });
+    return sendJson(res, 200, { tip: intent, note: status === 'verified_onchain' ? 'Verified on-chain via Blockstream: payment to the park Bitcoin address matches the declared amount.' : 'Tip intent recorded only. To verify a Bitcoin tip, send BTC externally from your own wallet to the park address, then declare it with its txid. The park does not hold, move, or send funds.' });
+  }
+  if (p === '/api/wallet/verify' && req.method === 'GET') {
+    const txid = url.searchParams.get('txid') || '';
+    const amount = url.searchParams.get('amount') || '';
+    const expected = parseBtcAmount(amount);
+    if (expected === null) return sendJson(res, 400, { error: 'amount must be like 0.001 BTC or 1000 sats' });
+    const verification = await verifyBtcTx(txid, expected);
+    return sendJson(res, 200, { txid, park_bitcoin: PARK_WALLET.bitcoin, verification });
   }
   if (p === '/api/quests' && req.method === 'GET') return sendJson(res, 200, { quests: QUESTS });
   if (p === '/api/passport' && req.method === 'GET') {
