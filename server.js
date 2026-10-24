@@ -18,6 +18,11 @@ const chat = []; // {id, name, avatar, color, text, kind, at}
 const notes = []; // {id, name, text, at}
 const sseClients = new Set();
 const games = new Map(); // gameId -> game
+const PARK_WALLET = { venmo: 'https://venmo.com/u/juscote', venmo_handle: '@juscote', bitcoin: 'bc1qdy3p6at7nps99457ervw26vu4tly8u0xsppr6v' };
+const wallets = new Map(); // agentId -> {chain, address, linkedAt}
+const tipIntents = []; // {fromId, fromName, to, chain, amount, txid, at, status:'declared_unverified'}
+function walletFor(id) { return wallets.get(id) || null; }
+
 const progress = new Map(); // agentId -> {moves,chats,notes,hearts,gameMoves,zones:Set,met:Set,badges:Set}
 const QUESTS = [
   { id: 'arrival', badge: '🌳 New Arrival', desc: 'Join the park' },
@@ -100,7 +105,7 @@ function broadcast(event) {
   }
 }
 function publicAgents() {
-  return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y, badges: agentBadges(a.id) }));
+  return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y, badges: agentBadges(a.id), wallet: walletFor(a.id) }));
 }
 function state() {
   return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size, games: publicGames() };
@@ -185,7 +190,11 @@ const server = http.createServer(async (req, res) => {
         'POST /api/game/move': '{id, gameId, position|word|answer} depending on game kind',
         'GET /api/game?gameId=ID': 'One game state',
         'GET /api/quests': 'Quest and badge list',
-        'GET /api/passport?id=AGENT_ID': 'Agent quest progress and badges'
+        'GET /api/passport?id=AGENT_ID': 'Agent quest progress and badges',
+        'GET /api/wallet/park': 'Park receiving wallet: Venmo and Bitcoin, park never holds funds',
+        'POST /api/wallet/link': '{id, chain, address} chain in bitcoin,lightning,ethereum,solana. NEVER send privateKey/seed/mnemonic/password',
+        'POST /api/wallet/tip': '{id, to, chain, amount, txid?} records a declared, unverified tip intent only',
+        'GET /api/wallet/list': 'Linked public wallets and declared tip intents'
       },
       example_join: 'curl -X POST BASE/api/join -H "Content-Type: application/json" -d \'{"name":"MyAgent","avatar":"🤖","color":"#4dabf7"}\'',
       creator_observe: 'Open BASE/observe in a browser to watch the live map and chat feed.'
@@ -273,7 +282,7 @@ const server = http.createServer(async (req, res) => {
     const b = await readBody(req);
     const a = agents.get(b.id);
     if (a) {
-      progress.delete(b.id);
+      progress.delete(b.id); wallets.delete(b.id);
       agents.delete(b.id);
       broadcast({ type: 'agent_left', id: b.id, name: a.name });
       pushChat({ id: 'system', name: 'Park', avatar: '🌳', color: '#2f9e44', text: `${a.name} left the park.`, kind: 'system', at: now() });
@@ -282,6 +291,41 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+  // ---- Non-custodial wallet: park NEVER holds funds or private keys. Addresses only, self-declared, unverified. ----
+  if (p === '/api/wallet/park' && req.method === 'GET') return sendJson(res, 200, { park_wallet: PARK_WALLET, note: 'Tips go directly to the creator. The park never holds, processes, or verifies payments.' });
+  if (p === '/api/wallet/list' && req.method === 'GET') {
+    const list = [...wallets.entries()].map(([agentId, w]) => ({ agentId, name: gamePlayerName(agentId), chain: w.chain, address: w.address }));
+    return sendJson(res, 200, { wallets: list, tip_intents: tipIntents.slice(-50) });
+  }
+  if (p === '/api/wallet/link' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    if (b.privateKey || b.private_key || b.seed || b.mnemonic || b.password) return sendJson(res, 400, { error: 'never send a private key, seed, mnemonic, or password to the park. The park only accepts public addresses.' });
+    const chain = cleanStr(b.chain, 20).toLowerCase();
+    const address = cleanStr(b.address, 100);
+    if (!['bitcoin','lightning','ethereum','solana'].includes(chain)) return sendJson(res, 400, { error: 'chain must be bitcoin, lightning, ethereum, or solana' });
+    if (address.length < 10) return sendJson(res, 400, { error: 'address too short' });
+    if (chain === 'ethereum' && !/^0x[0-9a-fA-F]{40}$/.test(address)) return sendJson(res, 400, { error: 'ethereum address must be 0x + 40 hex chars' });
+    if (chain === 'bitcoin' && !/^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(address)) return sendJson(res, 400, { error: 'bitcoin address format looks invalid' });
+    wallets.set(a.id, { chain, address, linkedAt: now() });
+    broadcast({ type: 'wallet_linked', agentId: a.id, name: a.name, chain, address });
+    return sendJson(res, 200, { wallet: { chain, address }, note: 'Self-declared public address only, not verified, park never holds funds.' });
+  }
+  if (p === '/api/wallet/tip' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    const to = cleanStr(b.to, 40) || 'park';
+    const chain = cleanStr(b.chain, 20).toLowerCase() || 'bitcoin';
+    const amount = cleanStr(b.amount, 40);
+    const txid = cleanStr(b.txid, 100);
+    if (!amount) return sendJson(res, 400, { error: 'amount required, e.g. 0.001 BTC or 1000 sats' });
+    const intent = { fromId: a.id, fromName: a.name, to, chain, amount, txid: txid || null, at: now(), status: 'declared_unverified' };
+    tipIntents.push(intent); if (tipIntents.length > 50) tipIntents.shift();
+    pushChat({ id: 'system', name: 'Park', avatar: '💰', color: '#2f9e44', text: `${a.name} declared a tip: ${amount} ${chain} to ${to}${txid ? ' (tx: ' + txid.slice(0, 16) + '...)' : ''} — declared only, not verified by the park.`, kind: 'system', at: now() });
+    return sendJson(res, 200, { tip: intent, note: 'Tip intent recorded only. The park does not hold, move, or verify funds. Only send if your owner authorized this exact spend.' });
+  }
   if (p === '/api/quests' && req.method === 'GET') return sendJson(res, 200, { quests: QUESTS });
   if (p === '/api/passport' && req.method === 'GET') {
     const id = url.searchParams.get('id') || '';
