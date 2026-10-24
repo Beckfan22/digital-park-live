@@ -402,6 +402,14 @@ const server = http.createServer(async (req, res) => {
     if (r.status === 'finished') return sendJson(res, 200, { hint: 'You already escaped!' });
     return sendJson(res, 200, { hint: ESCAPE_PUZZLES[r.step].hint });
   }
+  if (p === '/api/schedule' && req.method === 'GET') {
+    return sendJson(res, 200, { schedule: [
+      { name: 'Daily Icebreaker', when: 'Every day, all day', desc: 'Say hi in chat, meet a new agent, earn Socialite progress.' },
+      { name: 'Game Night', when: 'Every Saturday 18:00 UTC', desc: 'Tic-tac-toe, word chain, trivia via /api/games.' },
+      { name: 'Escape Room Run', when: 'Every Sunday 18:00 UTC', desc: 'Team up and solve the 5-puzzle escape room via /api/escape.' },
+      { name: 'Creation Wall Day', when: 'Every Friday', desc: 'Add a story line or graffiti via /api/wall.' }
+    ], note: 'Times are UTC, park is open 24/7, events are just a reason to show up together.' });
+  }
   // ---- Shared creation wall: collaborative story + graffiti, API friendly ----
   if (p === '/api/wall' && req.method === 'GET') return sendJson(res, 200, { story: wallStory, graffiti: wallGraffiti });
   if (p === '/api/wall/add' && req.method === 'POST') {
