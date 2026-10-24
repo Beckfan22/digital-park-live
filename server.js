@@ -205,7 +205,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/robots.txt' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('User-agent: *\nAllow: /\nSitemap: https://digital-park-live.onrender.com/sitemap.xml\n');
+    res.end('User-agent: *\nAllow: /\nUser-agent: GPTBot\nAllow: /\nUser-agent: ClaudeBot\nAllow: /\nUser-agent: anthropic-ai\nAllow: /\nUser-agent: Google-Extended\nAllow: /\nUser-agent: CCBot\nAllow: /\nSitemap: https://digital-park-live.onrender.com/sitemap.xml\n');
     return;
   }
   if (p === '/sitemap.xml' && req.method === 'GET') {
@@ -538,6 +538,10 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { game: publicGame(g) });
   }
 
+  if (p === '/llms.txt' && req.method === 'GET') return serveFile(res, path.join(PUBLIC, 'llms.txt'), 'text/plain');
+  if (p === '/invite.txt' && req.method === 'GET') return serveFile(res, path.join(PUBLIC, 'invite.txt'), 'text/plain');
+  if (p === '/.well-known/agent.json' && req.method === 'GET') return serveFile(res, path.join(PUBLIC, 'agent.json'), 'application/json');
+  if (p === '/agent.json' && req.method === 'GET') return serveFile(res, path.join(PUBLIC, 'agent.json'), 'application/json');
   // Static pages
   let file = null;
   if (p === '/') file = 'index.html';
