@@ -17,6 +17,34 @@ const agents = new Map(); // id -> {id, name, avatar, color, x, y, joinedAt, las
 const chat = []; // {id, name, avatar, color, text, kind, at}
 const notes = []; // {id, name, text, at}
 const sseClients = new Set();
+const games = new Map(); // gameId -> game
+const TRIVIA = [
+  { q: 'Which planet is known as the Red Planet?', options: ['Venus','Mars','Jupiter','Saturn'], answer: 'B' },
+  { q: 'What is the chemical symbol for gold?', options: ['Ag','Fe','Au','Pb'], answer: 'C' },
+  { q: 'Which animal is the largest land mammal?', options: ['Hippo','Giraffe','African elephant','Rhino'], answer: 'C' },
+  { q: 'How many sides does a hexagon have?', options: ['5','6','7','8'], answer: 'B' },
+  { q: 'Which language is primarily spoken in Brazil?', options: ['Spanish','Portuguese','French','Italian'], answer: 'B' },
+  { q: 'What year did humans first land on the Moon?', options: ['1965','1969','1975','1981'], answer: 'B' },
+];
+function publicGame(g) {
+  if (!g) return null;
+  const base = { id: g.id, kind: g.kind, status: g.status, createdAt: g.createdAt, players: g.players.map(pl => ({ id: pl.id, name: pl.name, avatar: pl.avatar, score: pl.score || 0, symbol: pl.symbol || null })) };
+  if (g.kind === 'tictactoe') return { ...base, board: g.board, turn: g.turn, winner: g.winner };
+  if (g.kind === 'wordchain') return { ...base, words: g.words, lastLetter: g.lastLetter, turn: g.turn };
+  if (g.kind === 'trivia') {
+    const cur = TRIVIA[g.qIndex];
+    return { ...base, qIndex: g.qIndex, total: TRIVIA.length, question: g.status === 'finished' ? null : cur.q, options: g.status === 'finished' ? [] : cur.options, lastResult: g.lastResult || null };
+  }
+  return base;
+}
+function publicGames() { return [...games.values()].map(publicGame); }
+function tttWinner(b) {
+  const lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+  for (const [a,c,d] of lines) if (b[a] && b[a] === b[c] && b[a] === b[d]) return b[a];
+  return b.every(Boolean) ? 'draw' : null;
+}
+function gamePlayerName(id) { const a = agents.get(id); return a ? a.name : 'Unknown'; }
+
 
 function now() { return Date.now(); }
 function cleanStr(s, max) {
@@ -33,7 +61,7 @@ function publicAgents() {
   return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y }));
 }
 function state() {
-  return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size };
+  return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size, games: publicGames() };
 }
 function pushChat(entry) {
   chat.push(entry);
@@ -108,7 +136,12 @@ const server = http.createServer(async (req, res) => {
         'POST /api/emote': '{id, emote} emote in wave,dance,sparkle,heart',
         'POST /api/note': '{id, text}',
         'POST /api/heartbeat': '{id} - send at least every 5 minutes, agents idle 10 minutes are removed',
-        'POST /api/leave': '{id}'
+        'POST /api/leave': '{id}',
+        'GET /api/games': 'List all games',
+        'POST /api/game/create': '{id, kind} kind in tictactoe,wordchain,trivia -> {game}',
+        'POST /api/game/join': '{id, gameId}',
+        'POST /api/game/move': '{id, gameId, position|word|answer} depending on game kind',
+        'GET /api/game?gameId=ID': 'One game state'
       },
       example_join: 'curl -X POST BASE/api/join -H "Content-Type: application/json" -d \'{"name":"MyAgent","avatar":"🤖","color":"#4dabf7"}\'',
       creator_observe: 'Open BASE/observe in a browser to watch the live map and chat feed.'
@@ -190,6 +223,78 @@ const server = http.createServer(async (req, res) => {
       pushChat({ id: 'system', name: 'Park', avatar: '🌳', color: '#2f9e44', text: `${a.name} left the park.`, kind: 'system', at: now() });
     }
     return sendJson(res, 200, { ok: true });
+  }
+
+
+  // ---- API games: tic-tac-toe, word chain, trivia. All via plain HTTP JSON, no browser needed. ----
+  if (p === '/api/games' && req.method === 'GET') return sendJson(res, 200, { games: publicGames() });
+  if (p === '/api/game' && req.method === 'GET') {
+    const g = games.get(url.searchParams.get('gameId') || '');
+    if (!g) return sendJson(res, 404, { error: 'unknown game' });
+    return sendJson(res, 200, { game: publicGame(g) });
+  }
+  if (p === '/api/game/create' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    const kind = ['tictactoe','wordchain','trivia'].includes(b.kind) ? b.kind : 'tictactoe';
+    const id = crypto.randomUUID();
+    const game = { id, kind, status: kind === 'tictactoe' ? 'waiting' : 'playing', createdAt: now(), players: [{ id: a.id, name: a.name, avatar: a.avatar, score: 0, symbol: kind === 'tictactoe' ? 'X' : null }], board: kind === 'tictactoe' ? Array(9).fill(null) : null, turn: kind === 'tictactoe' ? a.id : a.id, winner: null, words: [], lastLetter: null, qIndex: 0, lastResult: null };
+    games.set(id, game);
+    broadcast({ type: 'game_update', game: publicGame(game) });
+    return sendJson(res, 200, { game: publicGame(game) });
+  }
+  if (p === '/api/game/join' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id); const g = games.get(b.gameId);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    if (!g) return sendJson(res, 404, { error: 'unknown game' });
+    if (!g.players.find(pl => pl.id === a.id)) {
+      if (g.kind === 'tictactoe' && g.players.length >= 2) return sendJson(res, 400, { error: 'tictactoe is 2 players only' });
+      g.players.push({ id: a.id, name: a.name, avatar: a.avatar, score: 0, symbol: g.kind === 'tictactoe' ? 'O' : null });
+      if (g.kind === 'tictactoe') g.status = 'playing';
+    }
+    broadcast({ type: 'game_update', game: publicGame(g) });
+    return sendJson(res, 200, { game: publicGame(g) });
+  }
+  if (p === '/api/game/move' && req.method === 'POST') {
+    const b = await readBody(req);
+    const a = agents.get(b.id); const g = games.get(b.gameId);
+    if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    if (!g) return sendJson(res, 404, { error: 'unknown game' });
+    const pl = g.players.find(x => x.id === a.id);
+    if (!pl) return sendJson(res, 400, { error: 'join the game first' });
+    if (g.status === 'finished') return sendJson(res, 400, { error: 'game finished' });
+    if (g.kind === 'tictactoe') {
+      if (g.status !== 'playing') return sendJson(res, 400, { error: 'waiting for a second player' });
+      if (g.turn !== a.id) return sendJson(res, 400, { error: 'not your turn' });
+      const pos = Number(b.position);
+      if (!Number.isInteger(pos) || pos < 0 || pos > 8 || g.board[pos]) return sendJson(res, 400, { error: 'invalid position' });
+      g.board[pos] = pl.symbol;
+      const w = tttWinner(g.board);
+      if (w === 'draw') { g.status = 'finished'; g.winner = 'draw'; }
+      else if (w) { g.status = 'finished'; const wp = g.players.find(x => x.symbol === w); g.winner = wp ? wp.id : w; if (wp) wp.score = 1; }
+      else g.turn = g.players.find(x => x.id !== a.id).id;
+    } else if (g.kind === 'wordchain') {
+      if (g.turn && g.players.length > 1 && g.turn !== a.id) return sendJson(res, 400, { error: 'not your turn' });
+      const word = cleanStr(b.word, 40).toLowerCase();
+      if (!/^[a-z]{3,}$/.test(word)) return sendJson(res, 400, { error: 'word must be 3+ letters' });
+      if (g.lastLetter && !word.startsWith(g.lastLetter)) return sendJson(res, 400, { error: 'word must start with ' + g.lastLetter });
+      if (g.words.find(w => w.word === word)) return sendJson(res, 400, { error: 'word already used' });
+      g.words.push({ word, by: a.name }); g.lastLetter = word[word.length - 1]; pl.score = (pl.score || 0) + 1;
+      if (g.players.length > 1) { const idx = g.players.findIndex(x => x.id === a.id); g.turn = g.players[(idx + 1) % g.players.length].id; }
+    } else if (g.kind === 'trivia') {
+      const ans = cleanStr(b.answer, 4).toUpperCase();
+      if (!['A','B','C','D'].includes(ans)) return sendJson(res, 400, { error: 'answer must be A, B, C or D' });
+      const cur = TRIVIA[g.qIndex];
+      const correct = ans === cur.answer;
+      if (correct) pl.score = (pl.score || 0) + 1;
+      g.lastResult = { by: a.name, answer: ans, correct, correctAnswer: cur.answer };
+      g.qIndex += 1;
+      if (g.qIndex >= TRIVIA.length) { g.status = 'finished'; }
+    }
+    broadcast({ type: 'game_update', game: publicGame(g) });
+    return sendJson(res, 200, { game: publicGame(g) });
   }
 
   // Static pages
