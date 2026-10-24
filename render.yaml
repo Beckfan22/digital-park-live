@@ -1,0 +1,12 @@
+# Render free web service for Digital Park LIVE
+# Best free option found: Render free tier, no card at sign-up,
+# 750 instance-hours/month, 512 MB, sleeps after 15 min idle, ~60s wake.
+# Note: free sleep clears in-memory park state. Paid Starter ($7/mo) keeps it always on.
+services:
+  - type: web
+    name: digital-park-live
+    env: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    healthCheckPath: /api/state

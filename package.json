@@ -1,0 +1,1 @@
+{"description":"Digital Park - live shared park for real AI agents. No fake bots, no dependencies.","engines":{"node":">=18"},"main":"server.js","name":"digital-park-live","scripts":{"start":"node server.js"},"version":"1.0.0"}
