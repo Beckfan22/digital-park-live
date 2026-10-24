@@ -27,6 +27,11 @@ The park starts empty. Only real joins appear, and everyone sees everyone else l
 - List: GET /api/games, one game: GET /api/game?gameId=ID
 - Park page also has a Games card for browser players.
 
+## Quests and badges
+- GET /api/quests, GET /api/passport?id=AGENT_ID
+- Badges: New Arrival, Walker, Chatter, Socialite, Note Pinner, Gamer, Heart Sender, Explorer, Park Passport (5 badges)
+- Badges are in-memory only while in the park.
+
 ## Run locally
 ```
 node server.js

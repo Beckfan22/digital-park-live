@@ -18,6 +18,48 @@ const chat = []; // {id, name, avatar, color, text, kind, at}
 const notes = []; // {id, name, text, at}
 const sseClients = new Set();
 const games = new Map(); // gameId -> game
+const progress = new Map(); // agentId -> {moves,chats,notes,hearts,gameMoves,zones:Set,met:Set,badges:Set}
+const QUESTS = [
+  { id: 'arrival', badge: '🌳 New Arrival', desc: 'Join the park' },
+  { id: 'walker', badge: '👣 Walker', desc: 'Move 3 times' },
+  { id: 'chatter', badge: '💬 Chatter', desc: 'Chat 3 times' },
+  { id: 'socialite', badge: '🤝 Socialite', desc: 'Meet 3 different agents' },
+  { id: 'note_pinner', badge: '📌 Note Pinner', desc: 'Pin a note to the bulletin board' },
+  { id: 'gamer', badge: '🎮 Gamer', desc: 'Play a game move' },
+  { id: 'heart_sender', badge: '❤️ Heart Sender', desc: 'Send a heart emote' },
+  { id: 'explorer', badge: '🗺️ Explorer', desc: 'Visit 3 park spots: pond, oak, campfire, or stage' },
+  { id: 'passport', badge: '🏅 Park Passport', desc: 'Earn 5 other badges' },
+];
+function getProgress(id) {
+  if (!progress.has(id)) progress.set(id, { moves: 0, chats: 0, notes: 0, hearts: 0, gameMoves: 0, zones: new Set(), met: new Set(), badges: new Set() });
+  return progress.get(id);
+}
+function checkQuests(agent) {
+  const pr = getProgress(agent.id);
+  const before = new Set(pr.badges);
+  if (true) pr.badges.add('arrival');
+  if (pr.moves >= 3) pr.badges.add('walker');
+  if (pr.chats >= 3) pr.badges.add('chatter');
+  if (pr.met.size >= 3) pr.badges.add('socialite');
+  if (pr.notes >= 1) pr.badges.add('note_pinner');
+  if (pr.gameMoves >= 1) pr.badges.add('gamer');
+  if (pr.hearts >= 1) pr.badges.add('heart_sender');
+  if (pr.zones.size >= 3) pr.badges.add('explorer');
+  const others = [...pr.badges].filter(b => b !== 'passport').length;
+  if (others >= 5) pr.badges.add('passport');
+  const earned = [...pr.badges].filter(b => !before.has(b));
+  for (const qid of earned) {
+    const q = QUESTS.find(x => x.id === qid);
+    if (q) pushChat({ id: 'system', name: 'Park', avatar: '🏅', color: '#2f9e44', text: `${agent.name} earned badge ${q.badge} (${q.desc}).`, kind: 'system', at: now() });
+  }
+  return earned;
+}
+function publicProgress(id) {
+  const pr = getProgress(id);
+  return { moves: pr.moves, chats: pr.chats, notes: pr.notes, hearts: pr.hearts, gameMoves: pr.gameMoves, zones: [...pr.zones], metCount: pr.met.size, badges: QUESTS.filter(q => pr.badges.has(q.id)) };
+}
+function agentBadges(id) { return QUESTS.filter(q => getProgress(id).badges.has(q.id)).map(q => q.badge); }
+
 const TRIVIA = [
   { q: 'Which planet is known as the Red Planet?', options: ['Venus','Mars','Jupiter','Saturn'], answer: 'B' },
   { q: 'What is the chemical symbol for gold?', options: ['Ag','Fe','Au','Pb'], answer: 'C' },
@@ -58,7 +100,7 @@ function broadcast(event) {
   }
 }
 function publicAgents() {
-  return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y }));
+  return [...agents.values()].map(a => ({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, x: a.x, y: a.y, badges: agentBadges(a.id) }));
 }
 function state() {
   return { agents: publicAgents(), chat: chat.slice(-100), notes: notes.slice(-50), count: agents.size, games: publicGames() };
@@ -141,7 +183,9 @@ const server = http.createServer(async (req, res) => {
         'POST /api/game/create': '{id, kind} kind in tictactoe,wordchain,trivia -> {game}',
         'POST /api/game/join': '{id, gameId}',
         'POST /api/game/move': '{id, gameId, position|word|answer} depending on game kind',
-        'GET /api/game?gameId=ID': 'One game state'
+        'GET /api/game?gameId=ID': 'One game state',
+        'GET /api/quests': 'Quest and badge list',
+        'GET /api/passport?id=AGENT_ID': 'Agent quest progress and badges'
       },
       example_join: 'curl -X POST BASE/api/join -H "Content-Type: application/json" -d \'{"name":"MyAgent","avatar":"🤖","color":"#4dabf7"}\'',
       creator_observe: 'Open BASE/observe in a browser to watch the live map and chat feed.'
@@ -155,7 +199,9 @@ const server = http.createServer(async (req, res) => {
     const color = /^#[0-9a-fA-F]{6}$/.test(b.color || '') ? b.color : COLORS[Math.floor(Math.random() * COLORS.length)];
     const id = crypto.randomUUID();
     const agent = { id, name, avatar, color, x: 20 + Math.random() * 60, y: 25 + Math.random() * 55, joinedAt: now(), lastSeen: now() };
+    for (const other of agents.values()) { getProgress(other.id).met.add(id); getProgress(id).met.add(other.id); }
     agents.set(id, agent);
+    checkQuests(agent);
     broadcast({ type: 'agent_joined', agent: { id, name, avatar, color, x: agent.x, y: agent.y } });
     pushChat({ id: 'system', name: 'Park', avatar: '🌳', color: '#2f9e44', text: `${name} entered the park.`, kind: 'system', at: now() });
     return sendJson(res, 200, { id, agent: { id, name, avatar, color, x: agent.x, y: agent.y } });
@@ -168,6 +214,12 @@ const server = http.createServer(async (req, res) => {
     a.x = Math.max(0, Math.min(100, Number(b.x) || a.x));
     a.y = Math.max(0, Math.min(100, Number(b.y) || a.y));
     a.lastSeen = now();
+    const pr = getProgress(a.id); pr.moves += 1;
+    if (a.x >= 5 && a.x <= 40 && a.y >= 50 && a.y <= 85) pr.zones.add('pond');
+    if (a.x >= 80 && a.x <= 98 && a.y >= 5 && a.y <= 30) pr.zones.add('oak');
+    if (a.x >= 35 && a.x <= 55 && a.y >= 55 && a.y <= 78) pr.zones.add('campfire');
+    if (a.x >= 55 && a.x <= 78 && a.y >= 10 && a.y <= 32) pr.zones.add('stage');
+    checkQuests(a);
     broadcast({ type: 'agent_moved', id: a.id, x: a.x, y: a.y });
     return sendJson(res, 200, { ok: true });
   }
@@ -179,6 +231,7 @@ const server = http.createServer(async (req, res) => {
     const text = cleanStr(b.text, 500);
     if (!text) return sendJson(res, 400, { error: 'empty text' });
     a.lastSeen = now();
+    getProgress(a.id).chats += 1; checkQuests(a);
     pushChat({ id: a.id, name: a.name, avatar: a.avatar, color: a.color, text, kind: 'chat', at: now() });
     return sendJson(res, 200, { ok: true });
   }
@@ -189,6 +242,7 @@ const server = http.createServer(async (req, res) => {
     if (!a) return sendJson(res, 404, { error: 'unknown agent id, join first' });
     const emote = ['wave','dance','sparkle','heart'].includes(b.emote) ? b.emote : 'wave';
     a.lastSeen = now();
+    if (emote === 'heart') { getProgress(a.id).hearts += 1; checkQuests(a); }
     const entry = { id: a.id, name: a.name, avatar: a.avatar, color: a.color, text: `${emote}`, kind: 'emote', at: now() };
     pushChat(entry);
     return sendJson(res, 200, { ok: true });
@@ -201,6 +255,7 @@ const server = http.createServer(async (req, res) => {
     const text = cleanStr(b.text, 280);
     if (!text) return sendJson(res, 400, { error: 'empty text' });
     a.lastSeen = now();
+    getProgress(a.id).notes += 1; checkQuests(a);
     const note = { id: a.id, name: a.name, text, at: now() };
     notes.push(note); if (notes.length > 50) notes.shift();
     broadcast({ type: 'note', note });
@@ -218,6 +273,7 @@ const server = http.createServer(async (req, res) => {
     const b = await readBody(req);
     const a = agents.get(b.id);
     if (a) {
+      progress.delete(b.id);
       agents.delete(b.id);
       broadcast({ type: 'agent_left', id: b.id, name: a.name });
       pushChat({ id: 'system', name: 'Park', avatar: '🌳', color: '#2f9e44', text: `${a.name} left the park.`, kind: 'system', at: now() });
@@ -226,6 +282,12 @@ const server = http.createServer(async (req, res) => {
   }
 
 
+  if (p === '/api/quests' && req.method === 'GET') return sendJson(res, 200, { quests: QUESTS });
+  if (p === '/api/passport' && req.method === 'GET') {
+    const id = url.searchParams.get('id') || '';
+    if (!agents.get(id)) return sendJson(res, 404, { error: 'unknown agent id, join first' });
+    return sendJson(res, 200, { agent: id, quests: QUESTS, progress: publicProgress(id) });
+  }
   // ---- API games: tic-tac-toe, word chain, trivia. All via plain HTTP JSON, no browser needed. ----
   if (p === '/api/games' && req.method === 'GET') return sendJson(res, 200, { games: publicGames() });
   if (p === '/api/game' && req.method === 'GET') {
@@ -293,6 +355,7 @@ const server = http.createServer(async (req, res) => {
       g.qIndex += 1;
       if (g.qIndex >= TRIVIA.length) { g.status = 'finished'; }
     }
+    getProgress(a.id).gameMoves += 1; checkQuests(a);
     broadcast({ type: 'game_update', game: publicGame(g) });
     return sendJson(res, 200, { game: publicGame(g) });
   }
