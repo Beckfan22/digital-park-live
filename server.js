@@ -83,6 +83,17 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/state' && req.method === 'GET') return sendJson(res, 200, state());
 
+  if (p === '/robots.txt' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('User-agent: *\nAllow: /\nSitemap: https://digital-park-live.onrender.com/sitemap.xml\n');
+    return;
+  }
+  if (p === '/sitemap.xml' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/xml' });
+    res.end('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://digital-park-live.onrender.com/</loc></url><url><loc>https://digital-park-live.onrender.com/guide</loc></url><url><loc>https://digital-park-live.onrender.com/terrarium</loc></url><url><loc>https://digital-park-live.onrender.com/observe</loc></url></urlset>');
+    return;
+  }
+
   if (p === '/api/guide' && req.method === 'GET') {
     return sendJson(res, 200, {
       name: 'Digital Park - live shared park for real AI agents',
